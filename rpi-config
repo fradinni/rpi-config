@@ -12,6 +12,7 @@
 # Date:	  2014/02
 # -----------------------------------------------------------------------------
 
+ASK_TO_REBOOT=0
 
 # -----------------------------------------------------------------------------
 # Calculate framebuffer size for whiptail
@@ -29,10 +30,137 @@ calc_whiptail_size() {
   WT_MENU_HEIGHT=$(($WT_HEIGHT-8))
 }
 
+# -----------------------------------------------------------------------------
+# Install rpi-update utility
+#
+install_rpi_update() {
+	wget https://raw.github.com/Hexxeh/rpi-update/master/rpi-update -O /usr/bin/rpi-update && chmod +x /usr/bin/rpi-update
+}
+
+# -----------------------------------------------------------------------------
+# Install minimal dependencies to have a functionnal Raspbian distro
+#
+minimal_setup() {
+	apt-get update
+	apt-get install --yes console-setup sudo psmisc binutils
+	if [ ! "x$1" = "xno-rpi-update" ]; then
+		install_rpi_update
+		rpi-update
+	fi
+}
+
+add_pi_user() {
+	USER_NAME="pi"
+	if [ $1 ]; then
+		USER_NAME="$1"
+	fi
+	echo "Create new user '$USER_NAME'..."
+	#adduser --quiet $USER_NAME
+}
+
+
+# -----------------------------------------------------------------------------
+# Install rpi-update utility
+#
+install_rpi_update() {
+	wget https://raw.github.com/Hexxeh/rpi-update/master/rpi-update -O /usr/bin/rpi-update && chmod +x /usr/bin/rpi-update
+}
+
+# -----------------------------------------------------------------------------
+# Execute rpi-update utility
+#
+execute_rpi_update() {
+	rpi-update
+}
+
+
+# -----------------------------------------------------------------------------
+# Install minimal dependencies to have a functionnal Raspbian distro
+#
+minimal_setup() {
+	apt-get update
+	apt-get install --yes console-setup sudo psmisc binutils
+	if [ ! "x$1" = "xno-rpi-update" ]; then
+		install_rpi_update
+		execute_rpi_update	
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Add default pi user to Raspbian
+#
+add_pi_user() {
+	USER_NAME="pi"
+
+	# If another username is specified use it
+	if [ $1 ]; then
+		USER_NAME="$1"
+	fi
+
+	# Create user
+	echo "Create new user '$USER_NAME'..."
+	adduser --quiet $USER_NAME
+
+	# Add user to sudoers file
+	if [ -d '/home/$USER_NAME' ]; then
+		sed -i '/^root.*ALL$/a $USER_NAME\tALL=(ALL:ALL) ALL' /etc/sudoers
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Exit rpi-config
+#
+finish() {
+	if [ $ASK_TO_REBOOT -eq 1 ]; then
+    	whiptail --yesno "Would you like to reboot now?" 20 60 2
+    	if [ $? -eq 0 ]; then # yes
+      		sync
+      		reboot
+    	fi
+  	fi
+  	exit 0
+}
+
+
+do_execute_all() {
+	minimal_setup
+	add_pi_user
+}
+
 
 # -----------------------------------------------------------------------------
 # Program Entry Point
 #
 calc_whiptail_size
-echo "Width: $WT_WIDTH"
-echo "Height: $WT_HEIGHT"
+
+while true; do
+	CHOICE=$(whiptail \
+		--title "Raspbian Minimal Image Configuration Tool (rpi-config)" \
+		--menu "Setup Options" \
+		$WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+		--cancel-button Finish \
+		--ok-button Select \
+		"1 Install All" "Execute all steps" \
+		"2 Minimal Setup" "Install usefull dependencies" \
+		"3 Install rpi-update" "Install rpi-update utility" \
+		"4 Execute rpi-update" "Execute rpi-update utility" \
+		"5 Add 'pi' user" "Add 'pi' user to system" \
+	3>&1 1>&2 2>&3)
+	RET=$?
+	if [ $RET -eq 1 ]; then
+		finish
+	elif [ $RET -eq 0 ]; then
+		case "$CHOICE" in
+			1\ *) do_execute_all ;;
+			2\ *) minimal_setup no-rpi-update ;;
+			3\ *) install_rpi_update ;;
+			4\ *) execute_rpi_update ;;
+			5\ *) add_pi_user ;;
+			*) whiptail --msgbox "Error: unrecognized option" 20 60 1 ;;
+		esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+	else
+		exit 1
+	fi 
+done
