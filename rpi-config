@@ -8,10 +8,11 @@
 #        \/ |__|                        \/            \/        /_____/  
 #
 # -----------------------------------------------------------------------------
-# Author: Nicolas FRADIN
+# Author: Nicolas FRADIN inspired by asb - raspi-config
 # Date:	  2014/02
 # -----------------------------------------------------------------------------
 
+CUR_DIR=$(pwd)
 ASK_TO_REBOOT=0
 
 # -----------------------------------------------------------------------------
@@ -30,47 +31,27 @@ calc_whiptail_size() {
   WT_MENU_HEIGHT=$(($WT_HEIGHT-8))
 }
 
-# -----------------------------------------------------------------------------
-# Install rpi-update utility
-#
-install_rpi_update() {
-	wget https://raw.github.com/Hexxeh/rpi-update/master/rpi-update -O /usr/bin/rpi-update && chmod +x /usr/bin/rpi-update
-}
-
-# -----------------------------------------------------------------------------
-# Install minimal dependencies to have a functionnal Raspbian distro
-#
-minimal_setup() {
-	apt-get update
-	apt-get install --yes console-setup sudo psmisc binutils
-	if [ ! "x$1" = "xno-rpi-update" ]; then
-		install_rpi_update
-		rpi-update
-	fi
-}
-
-add_pi_user() {
-	USER_NAME="pi"
-	if [ $1 ]; then
-		USER_NAME="$1"
-	fi
-	echo "Create new user '$USER_NAME'..."
-	#adduser --quiet $USER_NAME
-}
-
 
 # -----------------------------------------------------------------------------
 # Install rpi-update utility
 #
 install_rpi_update() {
 	wget https://raw.github.com/Hexxeh/rpi-update/master/rpi-update -O /usr/bin/rpi-update && chmod +x /usr/bin/rpi-update
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Rpi-update installed." 20 60 2
+	fi
 }
+
 
 # -----------------------------------------------------------------------------
 # Execute rpi-update utility
 #
 execute_rpi_update() {
-	rpi-update
+	UPDATE_SELF=0 rpi-update
+	ASK_TO_REBOOT=1 # Reboot is needed after execution of rpi-update
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Raspberry-pi updated." 20 60 2
+	fi
 }
 
 
@@ -79,10 +60,29 @@ execute_rpi_update() {
 #
 minimal_setup() {
 	apt-get update
-	apt-get install --yes console-setup sudo psmisc binutils
-	if [ ! "x$1" = "xno-rpi-update" ]; then
-		install_rpi_update
-		execute_rpi_update	
+	apt-get install --yes console-setup sudo psmisc binutils wget ca-certificates git-core
+	dpkg-reconfigure tzdata
+	
+	if [ ! "x$1" = "x--no-rpi-update" ]; then
+		install_rpi_update --no-confirm
+		execute_rpi_update --no-confirm
+	fi
+
+	fix_sudo_hostname --no-confirm
+
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Minimal setup is done." 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Fix sudo 'unknown hostname' warn message
+#
+fix_sudo_hostname() {
+	sed -i "s/127\.0\.0\.1.*localhost/& raspberry-pi/" /etc/hosts
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Sudo hostname fixed." 20 60 2
 	fi
 }
 
@@ -93,19 +93,189 @@ minimal_setup() {
 add_pi_user() {
 	USER_NAME="pi"
 
-	# If another username is specified use it
-	if [ $1 ]; then
-		USER_NAME="$1"
+	if [ ! -d "/home/pi" ]; then
+		# Create user
+		echo "Create new user '$USER_NAME'..."
+		adduser --quiet $USER_NAME <<EOF
+pi
+pi
+
+Y
+
+EOF
+		# Add user to sudoers file
+		sed -i "/^root.*ALL$/a $USER_NAME\tALL=(ALL:ALL) ALL" /etc/sudoers
+	else
+		whiptail --msgbox "Error, user '$USER_NAME' already exists !" 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Install network tools packages
+#
+install_network_tools() {
+	apt-get install --yes iw wireless-tools wpasupplicant
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Network tools installed." 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Install AP tools packages
+#
+install_access_point_tools() {
+	apt-get install --yes isc-dhcp-server hostapd avahi-daemon
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "Access-Point tools installed." 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Configure USB power saving
+#
+configure_usb_powersaving() {
+	USB_PS_ENABLED="[Enabled]"
+	if [ -f "/etc/modprobe.d/8192cu.conf" ]; then
+		USB_PS_ENABLED="[Disabled]"
+	fi
+	USB_CHOICE=$(whiptail \
+		--title "USB Power Saving" \
+		--menu "USB Power Saving: $USB_PS_ENABLED" \
+		$WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+		--cancel-button Back \
+		--ok-button Select \
+		"1 Enable" "Enable USB power saving" \
+		"2 Disable" "Disable USB power saving" \
+	3>&1 1>&2 2>&3)
+
+	USB_RET=$?
+	if [ $USB_RET -eq 0 ]; then
+		case "$USB_CHOICE" in
+			1\ *) enable_usb_powersaving_8192cu ;;
+			2\ *) disable_usb_powersaving_8192cu ;;
+			*) whiptail --msgbox "Error: unrecognized option" 20 60 1 ;;
+		esac || whiptail --msgbox "There was an error running option $CHOICE" 20 60 1
+	fi 
+}
+
+
+# -----------------------------------------------------------------------------
+# Disable USB powersave
+#
+disable_usb_powersaving_8192cu() {
+	if [ ! -f "/etc/modprobe.d/8192cu.conf" ]; then
+		echo '#Disable usb power saving' > /etc/modprobe.d/8192cu.conf
+		echo 'options 8192cu rtw_power_mgnt=0 rtw_enusbss=1 rtw_ips_mode=1' >> /etc/modprobe.d/8192cu.conf
+		ASK_TO_REBOOT=1
+
+		if [ ! "x$1" = "x--no-confirm" ]; then
+			whiptail --msgbox "USB power saving disabled." 20 60 2
+		fi
+	else
+		whiptail --msgbox "Error, USB power saving is already disabled !" 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Enable USB powersave
+#
+enable_usb_powersaving_8192cu() {
+	if [ -f "/etc/modprobe.d/8192cu.conf" ]; then
+		rm /etc/modprobe.d/8192cu.conf
+		ASK_TO_REBOOT=1
+		if [ ! "x$1" = "x--no-confirm" ]; then
+			whiptail --msgbox "USB power saving enabled." 20 60 2
+		fi
+	else
+		if [ ! "x$1" = "x--no-confirm" ]; then
+			whiptail --msgbox "Error, USB power saving is already enabled !" 20 60 2
+		fi
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Install NodeJS
+#
+install_nodejs() {
+	wget http://nodejs.org/dist/v0.10.24/node-v0.10.24-linux-arm-pi.tar.gz -O /opt/node-v0.10.24-linux-arm-pi.tar.gz
+	cd /opt
+	tar xvzf node-v0.10.24-linux-arm-pi.tar.gz
+	rm node-v0.10.24-linux-arm-pi.tar.gz
+	echo 'NODEJS_HOME=/opt/node-v0.10.24-linux-arm-pi' >> /etc/profile
+	echo 'PATH=$PATH:$NODEJS_HOME/bin' >> /etc/profile
+	sleep 2
+	. /etc/profile
+	cd $CUR_DIR
+
+	if [ ! "x$1" = "x--no-confirm" ]; then
+		whiptail --msgbox "NodeJS installed." 20 60 2
+	fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Install NodeJS
+#
+resize_rootfs() {
+	if [ ! -h /dev/root ]; then
+		whiptail --msgbox "/dev/root does not exist or is not a symlink. Don't know how to expand" 20 60 2
+		return 0
 	fi
 
-	# Create user
-	echo "Create new user '$USER_NAME'..."
-	adduser --quiet $USER_NAME
-
-	# Add user to sudoers file
-	if [ -d '/home/$USER_NAME' ]; then
-		sed -i '/^root.*ALL$/a $USER_NAME\tALL=(ALL:ALL) ALL' /etc/sudoers
+	ROOT_PART=$(readlink /dev/root)
+	PART_NUM=${ROOT_PART#mmcblk0p}
+	if [ "$PART_NUM" = "$ROOT_PART" ]; then
+		whiptail --msgbox "/dev/root is not an SD card. Don't know how to expand" 20 60 2
+		return 0
 	fi
+
+	# NOTE: the NOOBS partition layout confuses parted. For now, let's only 
+	# agree to work with a sufficiently simple partition layout
+	if [ "$PART_NUM" -ne 2 ]; then
+		whiptail --msgbox "Your partition layout is not currently supported by this tool. You are probably using NOOBS, in which case your root filesystem is already expanded anyway." 20 60 2
+		return 0
+	fi
+
+	# Extract partitions count
+	NB_PARTS=$(( $(fdisk -l | grep ^/dev/mmcblk0 | wc -l) ))
+
+	# Prepare partitions list
+	LINES=""
+	for i in `seq 1 $NB_PARTS`
+	do
+		PART=$(fdisk -l | grep ^/dev/mmcblk0 | nl | head -n $i | tail -1)
+		LINES=$LINES $PART ok
+	done
+	echo $LINES
+
+	echo "PART_NUM = $PART_NUM"
+	exit 0
+
+	# Get the starting offset of the root partition
+	#PART_START=$(parted /dev/mmcblk0 -ms unit s p | grep "^${PART_NUM}" | cut -f 2 -d:)
+	#[ "$PART_START" ] || return 1
+	# Return value will likely be error for fdisk as it fails to reload the
+	# partition table because the root fs is mounted
+}
+
+
+# -----------------------------------------------------------------------------
+# Execute all configuration step
+#
+do_execute_all() {
+	minimal_setup --no-confirm
+	add_pi_user
+	install_network_tools --no-confirm
+	install_access_point_tools --no-confirm
+	disable_usb_powersaving_8192cu --no-confirm
+	install_nodejs --no-confirm
+
+	whiptail --msgbox "Installation is done." 20 60 2
 }
 
 
@@ -113,6 +283,7 @@ add_pi_user() {
 # Exit rpi-config
 #
 finish() {
+	cd $CUR_DIR
 	if [ $ASK_TO_REBOOT -eq 1 ]; then
     	whiptail --yesno "Would you like to reboot now?" 20 60 2
     	if [ $? -eq 0 ]; then # yes
@@ -124,17 +295,11 @@ finish() {
 }
 
 
-do_execute_all() {
-	minimal_setup
-	add_pi_user
-}
-
 
 # -----------------------------------------------------------------------------
 # Program Entry Point
 #
 calc_whiptail_size
-
 while true; do
 	CHOICE=$(whiptail \
 		--title "Raspbian Minimal Image Configuration Tool (rpi-config)" \
@@ -146,7 +311,13 @@ while true; do
 		"2 Minimal Setup" "Install usefull dependencies" \
 		"3 Install rpi-update" "Install rpi-update utility" \
 		"4 Execute rpi-update" "Execute rpi-update utility" \
-		"5 Add 'pi' user" "Add 'pi' user to system" \
+		"5 Add 'pi' user" "Create a 'pi' user on system" \
+		"6 Install Network tools" "Install network tools packages" \
+		"7 Install AP tools" "Install access-point tools packages" \
+		"8 USB power saving" "Configure USB power saving" \
+		"9 Fix sudo hostname" "Fix sudo 'unknown hostname' warn message" \
+		"10 Install NodeJS" "Install NodeJS v0.10.24" \
+		"11 Resize rootfs" "Resize root file system" \
 	3>&1 1>&2 2>&3)
 	RET=$?
 	if [ $RET -eq 1 ]; then
@@ -154,12 +325,18 @@ while true; do
 	elif [ $RET -eq 0 ]; then
 		case "$CHOICE" in
 			1\ *) do_execute_all ;;
-			2\ *) minimal_setup no-rpi-update ;;
+			2\ *) minimal_setup --no-rpi-update ;;
 			3\ *) install_rpi_update ;;
 			4\ *) execute_rpi_update ;;
 			5\ *) add_pi_user ;;
+			6\ *) install_network_tools ;;
+			7\ *) install_access_point_tools ;;
+			8\ *) configure_usb_powersaving ;;
+			9\ *) fix_sudo_hostname ;;
+			10\ *) install_nodejs ;;
+			11\ *) resize_rootfs ;;
 			*) whiptail --msgbox "Error: unrecognized option" 20 60 1 ;;
-		esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+		esac || whiptail --msgbox "There was an error running option $CHOICE" 20 60 1
 	else
 		exit 1
 	fi 
